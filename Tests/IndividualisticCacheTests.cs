@@ -4,6 +4,7 @@ using OrganicCache;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Linq;
 
 namespace Tests
 {
@@ -48,7 +49,7 @@ namespace Tests
 
             now();
 
-            Assert.IsTrue(nowTime > thenTime.AddSeconds(5), "Only " + (nowTime - thenTime).Seconds + " seconds had elapsed, BulkGetterFunction alone should've taken 5 seconds");
+            Assert.IsTrue(nowTime > thenTime.AddSeconds(5), "Only " + (nowTime - thenTime).Seconds + " seconds had elapsed, GetterFunction alone should've taken 5 seconds");
 
             then();
 
@@ -88,7 +89,7 @@ namespace Tests
 
             Assert.AreEqual("Ali", a.Name);
 
-            Thread.Sleep(10 * 1000);
+            Thread.Sleep(3 * 1000);
 
             var b = cache.Get(2);
 
@@ -102,13 +103,14 @@ namespace Tests
 
             var getterFunctionRuns = 0;
 
-            var cache = new IndividualisticCache<int, TestEntity>(i => i.Id, (id) => {
+            var cache = new IndividualisticCache<int, TestEntity>(i => i.Id, (id) =>
+            {
                 getterFunctionRuns++;
                 Thread.Sleep(10 * 1000);
                 return new TestEntity { Id = 2 };
             });
 
-            var t1 = Task.Run(() => 
+            var t1 = Task.Run(() =>
                 cache.Get(2)
             );
             var t2 = Task.Run(() =>
@@ -125,6 +127,44 @@ namespace Tests
             Assert.IsTrue(nowTime > thenTime.AddSeconds(10), "Only " + (nowTime - thenTime).Seconds + " seconds had elapsed, GetterFunction alone should've taken 10 seconds");
             Assert.IsNotNull(t1.Result);
             Assert.IsNotNull(t2.Result);
+        }
+
+        [TestMethod]
+        public void ShouldFollowMaximumConcurrentCallsToGetterFunction()
+        {
+            var getterFunctionRuns = 0;
+
+            var cacheA = new IndividualisticCache<int, object>(
+                idFunction: i => -1,
+                getterFunction: (id) =>
+                {
+                    getterFunctionRuns++;
+                    Thread.Sleep(1 * 1000);
+                    return new object();
+                },
+                getterFunctionWaitPeriod: TimeSpan.FromSeconds(10),
+                maximumConcurrentCallsToGetterFunction: 2
+            );
+
+            var i1 = Task.Run(() => cacheA.Get(1));
+            var i2 = Task.Run(() => cacheA.Get(2));
+            var i3 = Task.Run(() => cacheA.Get(3));
+
+            Thread.Sleep(1 * 1000); // now all getter functions should be completed
+            
+            Thread.Sleep((int)(0.1 * 1000)); // (error margin)
+            
+            Assert.IsTrue(i1.IsCompleted, "Instance 1 should have completed by now");
+            Assert.IsTrue(i2.IsCompleted, "Instance 2 should have completed by now");
+            Assert.IsTrue(i3.IsCompleted, "Instance 3 should have completed by now");
+
+            Thread.Sleep(10 * 1000); // now getterFunctionWaitPeriod is over; 3 getter functions should be queued and 2 getter functions should run (since maximumConcurrentCallsToGetterFunction is 2)
+
+            Thread.Sleep(1 * 1000); // now 1 last getter function should run
+
+            Thread.Sleep(1 * 1000); // now last one should be done
+
+            Assert.AreEqual(6, getterFunctionRuns, "3 + 2 + 1 getter functions should have run");
         }
 
         public class TestEntity

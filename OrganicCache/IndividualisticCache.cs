@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -11,28 +12,36 @@ using System.Threading.Tasks.Dataflow;
 namespace OrganicCache
 {
     public class IndividualisticCache<TInstance> : IndividualisticCache<string, TInstance> {
-        public IndividualisticCache(Func<TInstance, string> idFunction, Func<string, TInstance> getterFunction, TimeSpan getterFunctionWaitPeriod) : base(idFunction, getterFunction, getterFunctionWaitPeriod) { }
-        public IndividualisticCache(Func<TInstance, string> idFunction, Func<string, TInstance> getterFunction) : base(idFunction, getterFunction) { }
+        public IndividualisticCache(Func<string, TInstance> getterFunction, TimeSpan getterFunctionWaitPeriod) : base(getterFunction, getterFunctionWaitPeriod) { }
+        public IndividualisticCache(Func<string, TInstance> getterFunction) : base(getterFunction) { }
     }
 
     public class IndividualisticCache<TId, TInstance>
     {
-        public IndividualisticCache(Func<TInstance, TId> idFunction, Func<TId, TInstance> getterFunction, TimeSpan getterFunctionWaitPeriod)
-            : this(idFunction, getterFunction)
-        {
-            _getterFunctionWaitPeriod = getterFunctionWaitPeriod;
-        }
-
-        public IndividualisticCache(Func<TInstance, TId> idFunction, Func<TId, TInstance> getterFunction)
+        public IndividualisticCache(Func<TId, TInstance> getterFunction, Nullable<TimeSpan> getterFunctionWaitPeriod, int maximumConcurrentCallsToGetterFunction)
         {
             _getterFunction = getterFunction;
-            _idFunction = idFunction;
+            _getterFunctionWaitPeriod = getterFunctionWaitPeriod;
+            _getterFunctionExecutor = new ActionBlock<ExecutorItem>(
+                action: (item) => item.Run(),
+                dataflowBlockOptions: new ExecutionDataflowBlockOptions {
+                    MaxDegreeOfParallelism = maximumConcurrentCallsToGetterFunction,
+                }
+            );
+        }
+
+        public IndividualisticCache(Func<TId, TInstance> getterFunction, Nullable<TimeSpan> getterFunctionWaitPeriod)
+            : this(getterFunction, getterFunctionWaitPeriod, ExecutionDataflowBlockOptions.Unbounded) 
+        {
+        }
+
+        public IndividualisticCache(Func<TId, TInstance> getterFunction)
+            : this(getterFunction, null, ExecutionDataflowBlockOptions.Unbounded) 
+        {
         }
 
         private readonly Func<TId, TInstance> _getterFunction;
         private readonly Nullable<TimeSpan> _getterFunctionWaitPeriod;
-
-        private readonly Func<TInstance, TId> _idFunction;
 
         private readonly Dictionary<TId, bool> _hasRunGetterFunctionFirstTimeForInstance = new Dictionary<TId, bool>();
         private readonly Dictionary<TId, object> _hasRunGetterFunctionFirstTimeForInstanceLock = new Dictionary<TId, object>();
@@ -47,6 +56,7 @@ namespace OrganicCache
                 MaxDegreeOfParallelism = ExecutionDataflowBlockOptions.Unbounded,
             }
         );
+        private readonly ActionBlock<ExecutorItem> _getterFunctionExecutor;
 
         public TInstance Get(TId id)
         {
@@ -116,6 +126,23 @@ namespace OrganicCache
             {
                 await Task.Delay(Cache._getterFunctionWaitPeriod.Value, Cache._schedulerCancellationToken.Token).ConfigureAwait(false);
 
+                Cache._getterFunctionExecutor.Post(new ExecutorItem(Cache, Id));
+            }
+        }
+
+        protected class ExecutorItem
+        {
+            public ExecutorItem(IndividualisticCache<TId, TInstance> cache, TId id)
+            {
+                Cache = cache;
+                Id = id;
+            }
+
+            private readonly IndividualisticCache<TId, TInstance> Cache;
+            private readonly TId Id;
+
+            public void Run()
+            {
                 Cache.RunGetterFunction(Id);
             }
         }
